@@ -1,0 +1,155 @@
+document.addEventListener("DOMContentLoaded", function(event) { 
+  let clearBtn = document.querySelector("#clear-discount-btn");
+  let applyBtn = document.querySelector("#apply-discount-btn");
+  let discountCodeError = document.querySelector("#discount-code-error");
+  let discountCodeWrapper = document.querySelector("#applied-discount-code .applied-discount-code-wrapper");
+  let discountCodeValue = document.querySelector("#applied-discount-code .applied-discount-code-value");
+  let discountCodeInput = document.querySelector("#discount-code-input");
+  let totalCartSelector = document.querySelector(".cart__subtotal .money");
+  
+  let appliedDiscounts = JSON.parse(localStorage.getItem("appliedDiscounts") || "[]");
+
+  if (typeof customerHasLowestPriceTag !== 'undefined' && customerHasLowestPriceTag) {
+    applyAutomaticDiscounts(['custom-code-1', 'custom-code-2', 'custom-code-3', ... more codes]);
+  }
+
+  if (clearBtn)
+    clearBtn.addEventListener("click", function(e){
+      e.preventDefault();
+      clearDiscount();
+    });
+
+  if (applyBtn)
+    applyBtn.addEventListener("click", function(e){
+      e.preventDefault();
+      applyDiscount(discountCodeInput.value);
+    });
+
+  function clearDiscount() {
+    appliedDiscounts = [];
+    localStorage.setItem("appliedDiscounts", JSON.stringify(appliedDiscounts));
+    discountCodeValue.innerHTML = "";
+    discountCodeError.innerHTML = "";
+    fetch(`${Shopify.routes.root}checkout/clear`);
+    location.reload();
+  }
+
+  function applyAutomaticDiscounts(discountCodes) {
+    discountCodes.forEach(code => applyDiscount(code));
+  }
+
+  async function applyDiscount(code) {
+    if(applyBtn) {
+      applyBtn.innerHTML = "APPLYING <div class='loader'></div>";
+      applyBtn.style.pointerEvents = "none";
+    }
+
+    try {
+      // First, validate the new discount code
+      const validationResponse = await validateDiscountCode(code);
+      if (!validationResponse.isValid) {
+        throw new Error(validationResponse.error);
+      }
+
+      // If valid, add to applied discounts and apply all
+      if (!appliedDiscounts.includes(code)) {
+        appliedDiscounts.push(code);
+      }
+      
+      const applyResponse = await applyDiscounts(appliedDiscounts);
+      if (applyResponse.success) {
+        updateUI(applyResponse.discounts);
+        localStorage.setItem("appliedDiscounts", JSON.stringify(appliedDiscounts));
+      } else {
+        throw new Error(applyResponse.error);
+      }
+
+    } catch (error) {
+      console.error('Error:', error);
+      if(discountCodeError) discountCodeError.innerHTML = error.message;
+    } finally {
+      if(applyBtn) {
+        applyBtn.innerHTML = "APPLY";
+        applyBtn.style.pointerEvents = "all";
+      }
+    }
+  }
+
+  async function validateDiscountCode(code) {
+    const shopify_features_script = document.querySelector("script[id='shopify-features']");
+    const shopify_features_json = JSON.parse(shopify_features_script.innerHTML);
+    const cart = await fetch(`${Shopify.routes.root}cart.js`).then(response => response.json());
+    
+    const headers = {
+      Authorization: 'Basic ' + btoa(shopify_features_json.accessToken),
+      Accept: '*/*',
+      'Content-Type': 'application/json',
+    };
+
+    const body = {
+      checkout: {
+        line_items: cart.items,
+        discount_code: code,
+        country: Shopify.country,
+        presentment_currency: cart.currency,
+      },
+    };
+
+    const response = await fetch('/wallets/checkouts/', {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body),
+      referrerPolicy: 'no-referrer',
+    });
+
+    const data = await response.json();
+
+    if (data.errors && data.errors.discount_code) {
+      return { isValid: false, error: data.errors.discount_code[0].message };
+    }
+
+    return { isValid: true };
+  }
+
+  async function applyDiscounts(discountCodes) {
+    const response = await fetch(`${Shopify.routes.root}checkout?discount=${discountCodes.join(',')}&_=${Date.now()}`);
+    const html = await response.text();
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const discountScript = doc.querySelector('script[data-discount-allocations]');
+    
+    if (discountScript) {
+      const discountData = JSON.parse(discountScript.textContent);
+      return { success: true, discounts: discountData };
+    } else {
+      return { success: false, error: "Failed to apply discount" };
+    }
+  }
+
+  function updateUI(discounts) {
+    if(discountCodeWrapper) discountCodeWrapper.style.display = "inline";
+    if(discountCodeError) discountCodeError.innerHTML = "";
+    if(discountCodeValue) {
+      discountCodeValue.innerHTML = discounts.map(discount => 
+        `${discount.title} (${formatMoney(discount.amount)})`
+      ).join(', ');
+    }
+    
+    // update total if needed
+    //might need to adjust this based on how your cart data is structured
+    if(totalCartSelector) {
+      const totalPrice = discounts.reduce((total, discount) => total - discount.amount, cart.total_price);
+      totalCartSelector.innerHTML = `<s>${formatMoney(cart.total_price)}</s> ${formatMoney(totalPrice)}`;
+    }
+
+    // Refresh the cart to reflect changes
+    location.reload();
+  }
+
+  function formatMoney(cents) {
+    return (cents / 100).toLocaleString('en-US', {
+      style: 'currency',
+      currency: Shopify.currency.active
+    });
+  }
+});
